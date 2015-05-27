@@ -4,6 +4,7 @@ class JWT_AUTH_UserProcessor {
 
     public static function init() {
 
+        add_filter( 'woocommerce_api_check_authentication', array(__CLASS__, 'determine_current_user_for_wc'), 10);
         add_filter( 'determine_current_user', array(__CLASS__, 'determine_current_user'), 10);
         add_filter( 'json_authentication_errors', array(__CLASS__, 'json_authentication_errors'));
 
@@ -39,18 +40,20 @@ class JWT_AUTH_UserProcessor {
         return $authorization;
     }
 
-    protected static function findUser($jwt) {
+    protected static function findUser($jwt, $encodedJWT) {
         $overrideUserRepo = JWT_AUTH_Options::get('override_user_repo');
 
-        if ($overrideUserRepo) {
-            return call_user_func(array($overrideUserRepo, 'getUser'), $jwt);
-        }
-        else {
-            return JWT_AUTH_UsersRepo::getUser($jwt);
-        }
+        return apply_filters( 'wp_jwt_auth_get_user', $jwt, $encodedJWT );
     }
 
-    public static function determine_current_user ($user)
+    public static function determine_current_user_for_wc($user) {
+        return self::determine_current_user_generic($user, true);
+    }
+
+    public static function determine_current_user ($user) {
+        return self::determine_current_user_generic($user, false);
+    }
+    public static function determine_current_user_generic ($user, $returnUserObj)
     {
         global $wp_json_basic_auth_error;
 
@@ -58,7 +61,9 @@ class JWT_AUTH_UserProcessor {
 
         $authorization = self::getAuthorizationHeader();
 
-        if ($authorization !== false) {
+        $authorization = str_replace('Bearer ', '', $authorization);
+
+        if ($authorization !== '') {
 
             try {
                 $token = self::decodeJWT($authorization);
@@ -68,13 +73,19 @@ class JWT_AUTH_UserProcessor {
                 return null;
             }
 
-            $objuser = self::findUser($token);
+            $objuser = self::findUser($token, $authorization);
 
             if (!$objuser) {
                 $wp_json_basic_auth_error = 'Invalid user';
+                return null;
             }
 
-            $user = $objuser->ID;
+            if ($returnUserObj) {
+                $user = $objuser;
+            }
+            else {
+                $user = $objuser->ID;
+            }
         }
 
         $wp_json_basic_auth_error = true;
@@ -82,7 +93,7 @@ class JWT_AUTH_UserProcessor {
         return $user;
     }
 
-    protected static function decodeJWT($authorization)
+    protected static function decodeJWT($encUser)
     {
         require_once JWT_AUTH_PLUGIN_DIR . 'lib/php-jwt/Exceptions/BeforeValidException.php';
         require_once JWT_AUTH_PLUGIN_DIR . 'lib/php-jwt/Exceptions/ExpiredException.php';
@@ -97,8 +108,6 @@ class JWT_AUTH_UserProcessor {
             $secret = base64_decode(strtr($secret, '-_', '+/'));
         }
 
-        $encUser = str_replace('Bearer ', '', $authorization);
-
         try {
             // Decode the user
             $decodedToken = \JWT::decode($encUser, $secret, ['HS256']);
@@ -108,7 +117,6 @@ class JWT_AUTH_UserProcessor {
                 throw new Exception("This token is not intended for us.");
             }
         } catch(\UnexpectedValueException $e) {
-            die($e->getMessage());
             throw new Exception($e->getMessage());
         }
 
